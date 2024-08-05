@@ -14,19 +14,19 @@ output "identity_store_arn" {
 
 output "users" {
   value = {
-    for u in aws_identitystore_user.user : u.value.user_name => {
-      id           = u.value.user_id
-      user_name    = u.value.user_name
-      display_name = u.value.display_name
+    for u in aws_identitystore_user.user : u.user_name => {
+      id           = u.user_id
+      user_name    = u.user_name
+      display_name = u.display_name
     }
   }
 }
 
 output "groups" {
   value = {
-    for g in aws_identitystore_group.group : g.value.display_name => {
-      id           = g.value.group_id
-      display_name = g.value.display_name
+    for g in aws_identitystore_group.group : g.display_name => {
+      id           = g.group_id
+      display_name = g.display_name
     }
   }
 }
