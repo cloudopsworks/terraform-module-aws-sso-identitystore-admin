@@ -43,6 +43,6 @@ resource "aws_identitystore_group_membership" "group_membership" {
     ]...
   )
   identity_store_id = data.aws_ssoadmin_instances.sso.identity_store_ids[0]
-  group_id          = aws_identitystore_group.group[each.value.group_name].id
-  member_id         = aws_identitystore_user.user[each.value.user_name].id
+  group_id          = aws_identitystore_group.group[each.value.group_name].group_id
+  member_id         = aws_identitystore_user.user[each.value.user_name].user_id
 }
