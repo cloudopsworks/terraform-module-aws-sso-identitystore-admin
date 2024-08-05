@@ -19,8 +19,8 @@ resource "aws_identitystore_user" "user" {
   user_name         = each.value.user_name
   display_name      = try(each.value.display_name, "${each.value.first_name} ${each.value.last_name}")
   name {
-    given_name  = each.value.name.first_name
-    family_name = each.value.name.last_name
+    given_name  = each.value.first_name
+    family_name = each.value.last_name
   }
   dynamic "emails" {
     for_each = try(each.value.emails, [])
