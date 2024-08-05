@@ -17,10 +17,10 @@ resource "aws_identitystore_user" "user" {
   for_each          = { for u in var.users : u.user_name => u }
   identity_store_id = data.aws_ssoadmin_instances.sso.identity_store_ids[0]
   user_name         = each.value.user_name
-  display_name      = each.value.display_name
+  display_name      = try(each.value.display_name, "${each.value.first_name} ${each.value.last_name}")
   name {
-    given_name  = each.value.name.given_name
-    family_name = each.value.name.family_name
+    given_name  = each.value.name.first_name
+    family_name = each.value.name.last_name
   }
   dynamic "emails" {
     for_each = try(each.value.emails, [])
