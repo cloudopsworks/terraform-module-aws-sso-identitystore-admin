@@ -1,0 +1,48 @@
+##
+# (c) 2024 - Cloud Ops Works LLC - https://cloudops.works/
+#            On GitHub: https://github.com/cloudopsworks
+#            Distributed Under Apache v2.0 License
+#
+
+data "aws_ssoadmin_instances" "sso" {}
+
+resource "aws_identitystore_group" "group" {
+  for_each          = { for g in var.groups : g.display_name => g }
+  identity_store_id = data.aws_ssoadmin_instances.sso.identity_store_ids[0]
+  display_name      = each.value.display_name
+  description       = each.value.description
+}
+
+resource "aws_identitystore_user" "user" {
+  for_each          = { for u in var.users : u.user_name => u }
+  identity_store_id = data.aws_ssoadmin_instances.sso.identity_store_ids[0]
+  user_name         = each.value.user_name
+  display_name      = each.value.display_name
+  name {
+    given_name  = each.value.name.given_name
+    family_name = each.value.name.family_name
+  }
+  dynamic "emails" {
+    for_each = each.value.emails
+    content {
+      value   = emails.value.email
+      primary = try(emails.value.primary, null)
+    }
+  }
+}
+
+resource "aws_identitystore_group_membership" "group_membership" {
+  for_each = merge(
+    [
+      for u in var.users : {
+        for g in u.groups : "${u.user_name}-${g}" => {
+          user_name  = u.user_name
+          group_name = g
+        }
+      }
+    ]...
+  )
+  identity_store_id = data.aws_ssoadmin_instances.sso.identity_store_ids[0]
+  group_id          = aws_identitystore_group.group[each.value.group_name].id
+  member_id         = aws_identitystore_user.user[each.value.user_name].id
+}
