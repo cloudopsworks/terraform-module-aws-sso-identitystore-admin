@@ -10,7 +10,7 @@ resource "aws_identitystore_group" "group" {
   for_each          = { for g in var.groups : g.display_name => g }
   identity_store_id = data.aws_ssoadmin_instances.sso.identity_store_ids[0]
   display_name      = each.value.display_name
-  description       = each.value.description
+  description       = try(each.value.description, "Managed by Terraform")
 }
 
 resource "aws_identitystore_user" "user" {
