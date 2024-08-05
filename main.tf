@@ -33,15 +33,12 @@ resource "aws_identitystore_user" "user" {
   dynamic "addresses" {
     for_each = try(each.value.addresses, [])
     content {
-        address_line1 = addresses.value.address_line1
-        address_line2 = try(addresses.value.address_line2, null)
-        address_line3 = try(addresses.value.address_line3, null)
-        district      = try(addresses.value.district, null)
-        city          = addresses.value.city
-        region        = addresses.value.region
-        country       = addresses.value.country
-        postal_code   = addresses.value.postal_code
-        type          = try(addresses.value.type, null)
+      street_address = addresses.value.address_line
+      formatted      = try(addresses.value.formatted, null)
+      locality       = addresses.value.city
+      region         = addresses.value.region
+      postal_code    = addresses.value.postal_code
+      type           = try(addresses.value.type, null)
     }
   }
 }
