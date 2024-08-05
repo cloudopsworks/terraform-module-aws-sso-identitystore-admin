@@ -27,6 +27,21 @@ resource "aws_identitystore_user" "user" {
     content {
       value   = emails.value.email
       primary = try(emails.value.primary, null)
+      type    = try(emails.value.type, null)
+    }
+  }
+  dynamic "addresses" {
+    for_each = try(each.value.addresses, [])
+    content {
+        address_line1 = addresses.value.address_line1
+        address_line2 = try(addresses.value.address_line2, null)
+        address_line3 = try(addresses.value.address_line3, null)
+        district      = try(addresses.value.district, null)
+        city          = addresses.value.city
+        region        = addresses.value.region
+        country       = addresses.value.country
+        postal_code   = addresses.value.postal_code
+        type          = try(addresses.value.type, null)
     }
   }
 }
