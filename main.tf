@@ -23,7 +23,7 @@ resource "aws_identitystore_user" "user" {
     family_name = each.value.name.family_name
   }
   dynamic "emails" {
-    for_each = each.value.emails
+    for_each = try(each.value.emails, [])
     content {
       value   = emails.value.email
       primary = try(emails.value.primary, null)
