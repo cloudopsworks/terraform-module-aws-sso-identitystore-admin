@@ -14,7 +14,7 @@ resource "aws_identitystore_group" "group" {
 }
 
 data "aws_identitystore_user" "user" {
-  for_each          = { for u in var.users : u.user_name => u if try(u.provisioned, false) != false }
+  for_each          = { for u in var.users : u.user_name => u if try(u.provisioned, false) }
   identity_store_id = data.aws_ssoadmin_instances.sso.identity_store_ids[0]
   alternate_identifier {
     unique_attribute {
@@ -67,5 +67,5 @@ resource "aws_identitystore_group_membership" "group_membership" {
   )
   identity_store_id = data.aws_ssoadmin_instances.sso.identity_store_ids[0]
   group_id          = aws_identitystore_group.group[each.value.group_name].group_id
-  member_id         = try(each.value.provisioned, false) ? aws_identitystore_user.user[each.value.user_name].user_id : data.aws_identitystore_user.user[each.value.user_name].id
+  member_id         = try(each.value.provisioned, false) ? data.aws_identitystore_user.user[each.value.user_name].id : aws_identitystore_user.user[each.value.user_name].user_id
 }
