@@ -13,8 +13,19 @@ resource "aws_identitystore_group" "group" {
   description       = try(each.value.description, "Managed by Terraform")
 }
 
+data "aws_identitystore_user" "user" {
+  for_each          = { for u in var.users : u.user_name => u if try(u.provisioned, false) != false }
+  identity_store_id = data.aws_ssoadmin_instances.sso.identity_store_ids[0]
+  alternate_identifier {
+    unique_attribute {
+      attribute_path  = "UserName"
+      attribute_value = each.value.user_name
+    }
+  }
+}
+
 resource "aws_identitystore_user" "user" {
-  for_each          = { for u in var.users : u.user_name => u }
+  for_each          = { for u in var.users : u.user_name => u if try(u.provisioned, false) == false }
   identity_store_id = data.aws_ssoadmin_instances.sso.identity_store_ids[0]
   user_name         = each.value.user_name
   display_name      = try(each.value.display_name, "${each.value.first_name} ${each.value.last_name}")
@@ -56,5 +67,5 @@ resource "aws_identitystore_group_membership" "group_membership" {
   )
   identity_store_id = data.aws_ssoadmin_instances.sso.identity_store_ids[0]
   group_id          = aws_identitystore_group.group[each.value.group_name].group_id
-  member_id         = aws_identitystore_user.user[each.value.user_name].user_id
+  member_id         = try(each.value.provisioned, false) ? aws_identitystore_user.user[each.value.user_name].user_id : data.aws_identitystore_user.user[each.value.user_name].id
 }
