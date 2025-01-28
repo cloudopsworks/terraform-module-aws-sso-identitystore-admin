@@ -62,10 +62,28 @@ resource "aws_identitystore_group_membership" "group_membership" {
           user_name  = u.user_name
           group_name = g
         }
-      }
+      } if try(u.provisioned, false) == false
     ]...
   )
   identity_store_id = data.aws_ssoadmin_instances.sso.identity_store_ids[0]
   group_id          = aws_identitystore_group.group[each.value.group_name].group_id
-  member_id         = try(each.value.provisioned, false) ? data.aws_identitystore_user.user[each.value.user_name].id : aws_identitystore_user.user[each.value.user_name].user_id
+  member_id         = aws_identitystore_user.user[each.value.user_name].user_id
+
+}
+
+resource "aws_identitystore_group_membership" "provisioned_group_membership" {
+  for_each = merge(
+    [
+      for u in var.users : {
+        for g in u.groups : "${u.user_name}-${g}" => {
+          user_name  = u.user_name
+          group_name = g
+        }
+      } if try(u.provisioned, false)
+    ]...
+  )
+  identity_store_id = data.aws_ssoadmin_instances.sso.identity_store_ids[0]
+  group_id          = aws_identitystore_group.group[each.value.group_name].group_id
+  member_id         = data.aws_identitystore_user.user[each.value.user_name].id
+
 }
