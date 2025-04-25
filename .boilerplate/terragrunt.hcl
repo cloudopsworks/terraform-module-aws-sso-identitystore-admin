@@ -41,12 +41,13 @@ terraform {
 }
 
 inputs = {
-  org = {
-    organization_name = local.env_vars.org.organization_name
-    organization_unit = local.env_vars.org.organization_unit
-    environment_name  = local.env_vars.org.environment_name
-    environment_type  = local.env_vars.org.environment_type
-  }
+  # org = {
+  #   organization_name = local.env_vars.org.organization_name
+  #   organization_unit = local.env_vars.org.organization_unit
+  #   environment_name  = local.env_vars.org.environment_name
+  #   environment_type  = local.env_vars.org.environment_type
+  # }
+  org = local.env_vars.org
   {{- if .hub_spoke }}
   is_hub = {{ .is_hub }}
   spoke_def = local.spoke_vars.spoke_def
