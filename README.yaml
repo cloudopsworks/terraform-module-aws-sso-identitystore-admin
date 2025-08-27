@@ -1,4 +1,4 @@
-name: Terraform Transit Gateway Module
+name: Terraform AWS SSO IdentityStore Admin Module
 #logo: logo/logo.jpg
 
 license: "APACHE2"
@@ -8,23 +8,265 @@ copyrights:
     url: "https://cloudops.works"
     year: "2024"
 
-github_repo: cloudopsworks/terraform-module-aws-vpc-setup
+github_repo: cloudopsworks/terraform-module-aws-sso-identitystore-admin
 
 description: |-
-  VPC Module for setting up transit gateway with ResourceAccessMananger support.
+  Terraform module to declaratively manage AWS IAM Identity Center (AWS SSO)
+  IdentityStore resources: groups, users, and group memberships.
+  - Creates groups.
+  - Creates users when not pre-provisioned (provisioned=false).
+  - Links memberships for both newly created and already-provisioned users (provisioned=true).
+  Idempotent by design, it derives all desired state from inputs.
 
 # Introduction to the project
-#introduction: |-
-#  This is an introduction.
+introduction: |-
+  This module automates day-2 administration of AWS IAM Identity Center (formerly AWS SSO)
+  by codifying IdentityStore entities and relationships.
+
+  What it does
+  - Discovers your IdentityStore from the active SSO instance.
+  - Creates/ensures IdentityStore groups.
+  - Creates users (optional) and sets their attributes (name, emails, addresses, display name).
+  - Assigns users to groups, regardless of whether the user was created by this module or
+    already existed (mark such users as provisioned: true).
+
+  Why use it
+  - Keep SSO identities as code, reviewable and reproducible.
+  - Consistent tagging and naming metadata via the Cloud Ops Works tags local module.
+  - Safe for mixed estates: some users managed in HR/IdP, others bootstrapped by Terraform.
+
+  Notes
+  - The module selects the first SSO instance returned by aws_ssoadmin_instances data source.
+    If you operate multiple instances, run the module in the account/region that matches your
+    intended SSO instance, or wrap with extra selection logic.
+  - Terraform >= 1.3 and AWS provider ~> 6.4 are required.
 
 # How to use this project
-#usage: |-
+usage: |-
+  # Inputs (variables)
+  # Use these inputs via Terraform or Terragrunt. Types shown for clarity; defaults indicate optional.
+  variables:
+    org:
+      type: object
+      required: true
+      attributes:
+        organization_name: string
+        organization_unit: string
+        environment_type: string
+        environment_name: string
+      description: |
+        Organizational context used to build common tags and naming locals.
+        Fed into cloudopsworks/tags/local to generate consistent tags.
+    is_hub:
+      type: bool
+      default: false
+      required: false
+      description: Flag for hub/spoke topologies (used in name locals only).
+    spoke_def:
+      type: string
+      default: "001"
+      required: false
+      description: Spoke identifier used in name locals.
+    extra_tags:
+      type: map(string)
+      default: {}
+      required: false
+      description: Additional tags merged with common tags from the tags local module.
+
+    users:
+      type: list(object)
+      default: []
+      required: false
+      description: |
+        Users to create or reference in the IdentityStore. When provisioned is true, the
+        module will NOT create the user but will look it up by user_name (email) and manage
+        memberships. When false or omitted, the module will create the user.
+      schema:
+        - user_name: string            # Typically the email/UPN. Used to locate provisioned users.
+          first_name: string
+          last_name: string
+          display_name: string?        # Optional; defaults to "<first_name> <last_name>".
+          provisioned: bool?           # Optional; default false (user created by this module).
+          emails:                      # Optional list
+            - email: string
+              primary: bool?           # Optional
+              type: string?            # Optional (e.g. work)
+          addresses:                   # Optional list
+            - address_line: string
+              formatted: string?
+              city: string
+              region: string
+              postal_code: string
+              type: string?
+          groups:                      # Optional; memberships for this user
+            - string                   # Group display_name
+
+    groups:
+      type: list(object)
+      default: []
+      required: false
+      description: List of groups to create/ensure.
+      schema:
+        - display_name: string
+          description: string
+
+  # Outputs
+  outputs:
+    identity_store_id:
+      description: IdentityStore ID resolved from the active SSO instance.
+    identity_store_arn:
+      description: SSO instance ARN corresponding to the IdentityStore.
+    users:
+      description: Map of users created by this module keyed by user_name with id and display_name.
+    groups:
+      description: Map of groups created by this module keyed by display_name with id and display_name.
 
 # Example usage
-#examples: |-
+examples: |-
+  # Terragrunt example: basic users and groups
+  # File: live/sso/terragrunt.hcl
+  terraform {
+    source = "git::https://github.com/cloudopsworks/terraform-module-aws-sso-identitystore-admin.git//"
+  }
+
+  generate "provider" {
+    path      = "provider.tf"
+    if_exists = "overwrite"
+    contents  = <<EOF
+    terraform {
+      required_version = ">= 1.3"
+      required_providers {
+        aws = {
+          source  = "hashicorp/aws"
+          version = "~> 6.4"
+        }
+      }
+    }
+    provider "aws" {
+      region  = var.region != null ? var.region : "us-east-1"
+      profile = var.profile != null ? var.profile : null
+    }
+    EOF
+  }
+
+  inputs = {
+    org = {
+      organization_name = "acme"
+      organization_unit = "platform"
+      environment_type  = "prod"
+      environment_name  = "shared"
+    }
+
+    groups = [
+      { display_name = "Admins", description = "Administrators" },
+      { display_name = "Developers", description = "Engineering developers" }
+    ]
+
+    users = [
+      {
+        user_name   = "jane.doe@example.com"
+        first_name  = "Jane"
+        last_name   = "Doe"
+        emails      = [{ email = "jane.doe@example.com", primary = true, type = "work" }]
+        groups      = ["Admins", "Developers"]
+        provisioned = false  # create the user
+      },
+      {
+        user_name   = "john.provisioned@example.com"
+        first_name  = "John"
+        last_name   = "Provisioned"
+        groups      = ["Developers"]
+        provisioned = true   # do not create; look up existing user and set memberships
+      }
+    ]
+  }
+
+  # Terragrunt example: manage memberships for existing users only
+  # File: live/sso-memberships/terragrunt.hcl
+  terraform {
+    source = "git::https://github.com/cloudopsworks/terraform-module-aws-sso-identitystore-admin.git//"
+  }
+
+  inputs = {
+    org = {
+      organization_name = "acme"
+      organization_unit = "platform"
+      environment_type  = "prod"
+      environment_name  = "shared"
+    }
+
+    groups = [
+      { display_name = "Readers", description = "Read-only access" }
+    ]
+
+    users = [
+      {
+        user_name   = "audit.bot@example.com"
+        first_name  = "Audit"
+        last_name   = "Bot"
+        groups      = ["Readers"]
+        provisioned = true
+      }
+    ]
+  }
+
+  # Terragrunt example: load users/groups from YAML files
+  # File: live/sso-from-files/terragrunt.hcl
+  locals {
+    users  = yamldecode(file("users.yaml"))
+    groups = yamldecode(file("groups.yaml"))
+  }
+
+  terraform {
+    source = "git::https://github.com/cloudopsworks/terraform-module-aws-sso-identitystore-admin.git//"
+  }
+
+  inputs = {
+    org    = { organization_name = "acme", organization_unit = "security", environment_type = "prod", environment_name = "org" }
+    users  = local.users
+    groups = local.groups
+  }
+
+  # Example users.yaml
+  # users:
+  #   - user_name: alice@example.com
+  #     first_name: Alice
+  #     last_name: Allison
+  #     emails:
+  #       - email: alice@example.com
+  #         primary: true
+  #         type: work
+  #     groups:
+  #       - Developers
+  #
+  # Example groups.yaml
+  # groups:
+  #   - display_name: Developers
+  #     description: Engineering developers
 
 # How to get started quickly
-#quickstart: |-
+quickstart: |-
+  prerequisites:
+    - Terraform >= 1.3
+    - AWS provider ~> 6.4
+    - AWS IAM permissions to read SSO instances and manage IdentityStore (sso-admin, identitystore APIs).
+    - An AWS IAM Identity Center (SSO) instance already set up in your organization tenant.
+
+  steps:
+    - Configure AWS credentials and select a region used for IAM Identity Center (e.g., us-east-1).
+    - Create a working directory and a terragrunt.hcl using one of the examples above.
+    - Run:
+      - terragrunt init
+      - terragrunt plan
+      - terragrunt apply
+    - Verify:
+      - Groups and users appear in the AWS IAM Identity Center > Users and Groups.
+      - Outputs identity_store_id and identity_store_arn are populated.
+
+  tips:
+    - For existing users from your IdP/HR system, set provisioned: true; only memberships will be managed.
+    - Use separate environments/directories per account or scope in Terragrunt to isolate changes.
+    - If multiple SSO instances exist, ensure you run in the correct management account/region for the intended instance.
 
 include:
   - "docs/targets.md"
