@@ -1,18 +1,42 @@
 # Module configuration
-# Required variables
-{{- range .requiredVariables }}
-{{- if ne .Name "org"}}
-# Description {{ .Description }} , Type: {{ .Type }}
-{{ .Name }}: {{ .DefaultValuePlaceholder }}
-{{- end }}
-
-{{- end }}
-# Optional variables
-{{- range .optionalVariables }}
-{{- if ne .Name "is_hub" "spoke_def" "extra_args" }}
-# Description {{ .Description }} , Type: {{ .Type }}
-#{{ .Name }}: {{ .DefaultValue }}
-{{- end }}
-
-{{- end }}
-
+#
+# Variables supplied automatically by the Terragrunt hierarchy (do not set here):
+#   org        -> sourced from env-inputs.yaml
+#   spoke_def  -> sourced from spoke-inputs.yaml
+#   is_hub     -> set at scaffold time
+#   extra_tags -> built from the merged *-tags.json files
+#
+# groups: (Optional) List of groups to create in the IAM Identity Center identity store. Default: []
+groups: []
+#  - display_name: "Admins"              # (Required) Unique group display name; referenced by users[].groups.
+#    description: "Administrators"       # (Optional) Group description. Default: "Managed by Terraform"
+#  - display_name: "Developers"
+#    description: "Engineering developers"
+#
+# users: (Optional) List of users to create (provisioned: false) or reference (provisioned: true)
+#        in the identity store, together with their group memberships. Default: []
+users: []
+#  - user_name: "jane.doe@example.com"   # (Required) Unique user name, typically the email/UPN. Used to look up provisioned users.
+#    first_name: "Jane"                  # (Required when provisioned: false) Given name.
+#    last_name: "Doe"                    # (Required when provisioned: false) Family name.
+#    display_name: "Jane Doe"            # (Optional) Display name. Default: "<first_name> <last_name>"
+#    provisioned: false                  # (Optional) true = user already exists (SCIM/IdP), only memberships are managed;
+#                                        #            false = user is created by this module. Default: false
+#    emails:                             # (Optional) Email addresses. Ignored when provisioned: true. Default: []
+#      - email: "jane.doe@example.com"   # (Required) Email address.
+#        primary: true                   # (Optional) Primary email flag. Default: null
+#        type: "work"                    # (Optional) Free-form type (e.g. work, home, other). Default: null
+#    addresses:                          # (Optional) Postal addresses. Ignored when provisioned: true. Default: []
+#      - address_line: "123 Main St"     # (Required) Street address.
+#        city: "Seattle"                 # (Required) Locality / city.
+#        region: "WA"                    # (Required) Region / state.
+#        postal_code: "98101"            # (Required) Postal code.
+#        formatted: "123 Main St, Seattle, WA 98101" # (Optional) Full formatted address. Default: null
+#        type: "work"                    # (Optional) Free-form type (e.g. work, home). Default: null
+#    groups:                             # (Required) Group display_names (declared in `groups`) to join; use [] for none.
+#      - "Admins"
+#      - "Developers"
+#  - user_name: "john.existing@example.com"
+#    provisioned: true                   # Existing user: looked up by user_name, only memberships are managed.
+#    groups:
+#      - "Developers"
