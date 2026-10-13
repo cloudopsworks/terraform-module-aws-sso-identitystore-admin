@@ -19,6 +19,10 @@ locals {
     compact(flatten([try(var.encryption.delegated_admin_account_ids, [])]))
   )
   kms_key_rotation = try(var.encryption.enable_key_rotation, true) != false
+  kms_multi_region = try(var.encryption.multi_region, false) == true
+  kms_replica_regions = local.create_kms_key && local.kms_multi_region ? toset(
+    compact(flatten([try(var.encryption.replica_regions, [])]))
+  ) : toset([])
   kms_service_principals = [
     "identitystore.amazonaws.com",
     "sso.amazonaws.com",
@@ -171,7 +175,7 @@ resource "aws_kms_key" "this" {
   count                   = local.create_kms_key ? 1 : 0
   description             = "IAM Identity Center at-rest encryption key - ${local.system_name}"
   deletion_window_in_days = try(coalesce(var.encryption.deletion_window_in_days), 30)
-  multi_region            = try(var.encryption.multi_region, false) == true
+  multi_region            = local.kms_multi_region
   enable_key_rotation     = local.kms_key_rotation
   rotation_period_in_days = local.kms_key_rotation ? try(coalesce(var.encryption.rotation_period_in_days), 90) : null
   policy                  = data.aws_iam_policy_document.kms[0].json
@@ -182,4 +186,33 @@ resource "aws_kms_alias" "this" {
   count         = local.create_kms_key ? 1 : 0
   name          = "alias/identity-store-${local.system_name}"
   target_key_id = aws_kms_key.this[0].key_id
+}
+
+# Replicas of the multi-Region key, for IAM Identity Center replicated to other regions. They carry the primary key
+# policy, as AWS recommends the same policy across replicas, and the same alias in their region.
+resource "aws_kms_replica_key" "this" {
+  for_each                = local.kms_replica_regions
+  region                  = each.value
+  primary_key_arn         = aws_kms_key.this[0].arn
+  description             = aws_kms_key.this[0].description
+  deletion_window_in_days = aws_kms_key.this[0].deletion_window_in_days
+  policy                  = data.aws_iam_policy_document.kms[0].json
+  tags                    = merge(local.all_tags, {
+    "replica" = "true"
+    "replica-region" = each.value
+    "primary-region" = data.aws_region.current.region
+  })
+  lifecycle {
+    precondition {
+      condition     = each.value != data.aws_region.current.region
+      error_message = "encryption.replica_regions must not include the primary key region (${data.aws_region.current.region})."
+    }
+  }
+}
+
+resource "aws_kms_alias" "replica" {
+  for_each      = aws_kms_replica_key.this
+  region        = each.key
+  name          = aws_kms_alias.this[0].name
+  target_key_id = each.value.key_id
 }

@@ -115,6 +115,11 @@ At-rest encryption
   [baseline KMS key policy](https://docs.aws.amazon.com/singlesignon/latest/userguide/baseline-KMS-key-policy.html)).
 - The revert runs from a destroy-only resource, so a failed or interrupted forward update (which the next
   apply retries) never skips it.
+- With `multi_region: true`, `replica_regions` replicates the module-created key (same key policy and alias)
+  to the regions where IAM Identity Center is or will be replicated; AWS requires a multi-Region key for that.
+  Replicas exist before the instance moves to the key, and are deleted only after it has moved back. Removing a
+  region schedules that replica for deletion, so only do it once Identity Center no longer runs there. The
+  module doesn't replicate Identity Center itself. Switching `multi_region` on an existing key replaces the key.
 - Changing the key re-encrypts twice (back to the AWS owned key, then to the new key).
 - The encryption state is set by the CLI, not read back: a change made outside Terraform (console, API) is
   not detected.
@@ -217,6 +222,11 @@ encryption: {}
 #                                        #            the key. Default: ""
 #  deletion_window_in_days: 30           # (Optional) Module-created key only. Waiting period before deletion, 7-30. Default: 30
 #  multi_region: false                   # (Optional) Module-created key only. true = multi-Region primary key. Default: false
+#  replica_regions: []                   # (Optional) Module-created key only, requires multi_region: true. Regions where the key
+#                                        #            is replicated (same key policy and alias), e.g. for Identity Center
+#                                        #            replicated to other regions; [] = no replicas. Must not include the
+#                                        #            primary region. Default: []
+#    - "us-west-2"
 #  enable_key_rotation: true             # (Optional) Module-created key only. Automatic key material rotation. Default: true
 #  rotation_period_in_days: 90           # (Optional) Module-created key only. Rotation period in days, 90-2560. Default: 90
 #  delegated_admin_account_ids: []       # (Optional) Module-created key only. Identity Center delegated administrator account IDs
@@ -317,6 +327,7 @@ assumes the role itself (`iam_role`), drop the `assume_role` attribute.
 | `users` | Map of users created by this module, keyed by `user_name`, with `id`, `user_name` and `display_name`. |
 | `groups` | Map of groups created by this module, keyed by `display_name`, with `id` and `display_name`. |
 | `kms_key_arn` | ARN of the customer managed KMS key encrypting the instance (module-created or provided); `null` when encryption is not managed. |
+| `kms_replica_key_arns` | Map of region to ARN of the multi-Region key replicas created by this module; empty when none. |
 | `kms_key_alias` | Alias of the KMS key created by this module; `null` when no key is created. |
 
 ## Quick Start
@@ -395,6 +406,16 @@ encryption:
 ```
 
 ```yaml
+# Multi-Region key, replicated where Identity Center is (or will be) replicated
+encryption:
+  enabled: true
+  multi_region: true
+  replica_regions:      # [] = multi-Region key without replicas yet
+    - "us-west-2"
+    - "eu-west-1"
+```
+
+```yaml
 # Bring your own key (management account, instance region)
 encryption:
   enabled: true
@@ -452,8 +473,10 @@ Available targets:
 | [aws_identitystore_group_membership.group_membership](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/identitystore_group_membership) | resource |
 | [aws_identitystore_group_membership.provisioned_group_membership](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/identitystore_group_membership) | resource |
 | [aws_identitystore_user.user](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/identitystore_user) | resource |
+| [aws_kms_alias.replica](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/kms_alias) | resource |
 | [aws_kms_alias.this](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/kms_alias) | resource |
 | [aws_kms_key.this](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/kms_key) | resource |
+| [aws_kms_replica_key.this](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/kms_replica_key) | resource |
 | [awscc_sso_instance.this](https://registry.terraform.io/providers/hashicorp/awscc/latest/docs/resources/sso_instance) | resource |
 | [terraform_data.encryption](https://registry.terraform.io/providers/hashicorp/terraform/latest/docs/resources/data) | resource |
 | [terraform_data.encryption_guard](https://registry.terraform.io/providers/hashicorp/terraform/latest/docs/resources/data) | resource |
@@ -485,6 +508,7 @@ Available targets:
 | <a name="output_identity_store_id"></a> [identity\_store\_id](#output\_identity\_store\_id) | ID of the IAM Identity Center identity store resolved from the first SSO instance. |
 | <a name="output_kms_key_alias"></a> [kms\_key\_alias](#output\_kms\_key\_alias) | Alias of the KMS key created by this module for the IAM Identity Center instance; null when no key is created. |
 | <a name="output_kms_key_arn"></a> [kms\_key\_arn](#output\_kms\_key\_arn) | ARN of the customer managed KMS key encrypting the IAM Identity Center instance (module-created or provided); null when encryption is not managed. |
+| <a name="output_kms_replica_key_arns"></a> [kms\_replica\_key\_arns](#output\_kms\_replica\_key\_arns) | Map of region to ARN of the multi-Region KMS key replicas created by this module; empty when none. |
 | <a name="output_users"></a> [users](#output\_users) | Map of users created by this module, keyed by user\_name, with id, user\_name and display\_name. |
 
 

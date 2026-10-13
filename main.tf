@@ -148,6 +148,10 @@ check "encryption_hub_only" {
     condition     = var.is_hub || try(tobool(var.encryption.enabled), false) != true
     error_message = "encryption.enabled is ignored: at-rest encryption is applied only by the hub deployment (is_hub: true) that owns the organization instance."
   }
+  assert {
+    condition     = local.encryption_input_kms_key_arn == "" || length(compact(flatten([try(var.encryption.replica_regions, [])]))) == 0
+    error_message = "encryption.replica_regions is ignored with encryption.kms_key_arn: only a module-created key is replicated."
+  }
 }
 
 # Resolves the IAM role behind the provider credentials (issuer_arn keeps the role path), so the CLI can run as it,
@@ -196,9 +200,11 @@ locals {
 
 # Destroy-only guard: moves the instance back to the AWS owned key when encryption is disabled or the key changes,
 # and waits for it. Having no create provisioner, it is never tainted, so the revert always runs; depending on the
-# module-created key, it finishes before that key is scheduled for deletion.
+# module-created key and its replicas, it finishes before they are scheduled for deletion, and the replicas exist
+# before the instance moves to the key.
 resource "terraform_data" "encryption_guard" {
-  count = local.encryption_enabled ? 1 : 0
+  count      = local.encryption_enabled ? 1 : 0
+  depends_on = [aws_kms_replica_key.this]
   triggers_replace = {
     instance_arn = awscc_sso_instance.this[0].instance_arn
     region       = data.aws_region.current.region

@@ -55,6 +55,11 @@ variable "groups" {
 #                                       #            creates the key (alias/identity-store-<system_name>). Default: ""
 #   deletion_window_in_days: 30         # (Optional) Module-created key only. Waiting period before deletion, 7-30. Default: 30
 #   multi_region: false                 # (Optional) Module-created key only. true = multi-Region primary key. Default: false
+#   replica_regions: []                 # (Optional) Module-created key only, requires multi_region: true. Regions where the key
+#                                       #            is replicated (same key policy and alias), e.g. for Identity Center
+#                                       #            replicated to other regions; [] = no replicas. Must not include the
+#                                       #            primary region. Default: []
+#     - "us-west-2"
 #   enable_key_rotation: true           # (Optional) Module-created key only. Automatic key material rotation. Default: true
 #   rotation_period_in_days: 90         # (Optional) Module-created key only. Rotation period, 90-2560. Default: 90
 #   delegated_admin_account_ids: []     # (Optional) Module-created key only. Identity Center delegated administrator account IDs
@@ -72,6 +77,14 @@ variable "encryption" {
   description = "(Optional) At-rest encryption of the IAM Identity Center instance with a customer managed KMS key, applied only when is_hub is true. Default: {} (AWS owned key)"
   type        = any
   default     = {}
+  validation {
+    condition     = length(compact(flatten([try(var.encryption.replica_regions, [])]))) == 0 || try(var.encryption.multi_region, false) == true
+    error_message = "encryption.replica_regions requires encryption.multi_region: true."
+  }
+  validation {
+    condition     = alltrue([for region in compact(flatten([try(var.encryption.replica_regions, [])])) : can(regex("^[a-z]{2,4}(-[a-z]+)+-[0-9]+$", region))])
+    error_message = "encryption.replica_regions must list AWS region codes, e.g. us-west-2."
+  }
   validation {
     condition     = try(var.encryption.enabled, null) == null || can(tobool(var.encryption.enabled))
     error_message = "encryption.enabled must be true or false."

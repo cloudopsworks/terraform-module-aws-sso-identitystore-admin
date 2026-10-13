@@ -43,6 +43,11 @@ output "kms_key_arn" {
   value       = local.encryption_enabled ? local.encryption_kms_key_arn : null
 }
 
+output "kms_replica_key_arns" {
+  description = "Map of region to ARN of the multi-Region KMS key replicas created by this module; empty when none."
+  value       = { for region, replica in aws_kms_replica_key.this : region => replica.arn }
+}
+
 output "kms_key_alias" {
   description = "Alias of the KMS key created by this module for the IAM Identity Center instance; null when no key is created."
   value       = one(aws_kms_alias.this[*].name)
