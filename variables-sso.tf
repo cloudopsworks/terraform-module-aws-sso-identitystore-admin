@@ -63,7 +63,7 @@ variable "groups" {
 #   assume_role:                        # (Optional) How the AWS CLI step takes on the provider identity; mirror the provider
 #                                       #            assume_role when it needs more than the role. Default: {} (derived from
 #                                       #            the provider credentials)
-#     role_arn: ""                      # (Optional) Role the CLI runs as: the provider assume_role.role_arn. Empty = the role
+#     role_arn: ""                      # (Optional) Role the CLI runs as: the provider assume_role.role_arn, full ARN including path. Empty = the role
 #                                       #            behind the provider credentials, looked up with iam:GetRole. Default: ""
 #     external_id: ""                   # (Optional) External ID the role trust policy requires: the provider
 #                                       #            assume_role.external_id. Default: ""

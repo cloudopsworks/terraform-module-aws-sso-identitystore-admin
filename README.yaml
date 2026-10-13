@@ -80,6 +80,11 @@ introduction: |-
     policy (`AllowTerraformIdentityCenterAdministration`, conditioned on `kms:ViaService`), so no IAM policy
     change is needed. With your own key (`kms_key_arn`), add the same grant to its key policy or to the role's
     IAM policy; otherwise `UpdateInstance` fails with `AccessDeniedException ... kms:GenerateDataKeyWithoutPlaintext`.
+    The grant follows the identity that runs the apply, so apply through one role (the Terragrunt provider role).
+    It is still limited by that role's permissions boundary or session policies.
+  - Other administrators in the management account (permission sets, break-glass roles) get the key only through
+    IAM after encryption: give them the same four actions in their IAM policies, or they can't manage users and
+    groups.
   - Spoke deployments (`is_hub: false`) running in a delegated administrator account keep managing users and
     groups once the instance is on the key only if they can use it. List those accounts in
     `encryption.delegated_admin_account_ids`,
@@ -195,7 +200,7 @@ usage: |-
   #  assume_role:                          # (Optional) How the AWS CLI step takes on the provider identity; mirror the provider
   #                                        #            assume_role when it needs more than the role. Default: {} (derived from
   #                                        #            the provider credentials)
-  #    role_arn: ""                        # (Optional) Role the CLI runs as: the provider assume_role.role_arn. Empty = the role
+  #    role_arn: ""                        # (Optional) Role the CLI runs as: the provider assume_role.role_arn, full ARN including path. Empty = the role
   #                                        #            behind the provider credentials, looked up with iam:GetRole. Default: ""
   #    external_id: ""                     # (Optional) External ID the role trust policy requires: the provider
   #                                        #            assume_role.external_id. Default: ""
