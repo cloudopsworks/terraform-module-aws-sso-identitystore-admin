@@ -53,13 +53,33 @@ introduction: |-
   At-rest encryption
   - Neither `AWS::SSO::Instance` (awscc) nor the AWS provider expose the instance encryption
     configuration yet, so the module calls `aws sso-admin update-instance --encryption-configuration`
-    through the AWS CLI (a `terraform_data` resource). The CLI honours an `assume_role` provider
-    configuration and waits for the asynchronous re-encryption (`EncryptionStatus` back to `ENABLED`),
-    failing with the reported `EncryptionStatusReason` on `UPDATE_FAILED`.
+    through the AWS CLI (a `terraform_data` resource). It waits for the asynchronous re-encryption
+    (`EncryptionStatus` back to `ENABLED`), failing with the reported `EncryptionStatusReason` on `UPDATE_FAILED`.
+  - The CLI runs as the provider identity, including when the provider uses `assume_role`:
+    1. If the shell credentials already are that identity (the same IAM user, or any session of the same
+       role, as with Terragrunt `iam_role`), they are used as they are.
+    2. Otherwise the CLI assumes the provider role from the shell credentials, with
+       `encryption.assume_role.external_id` / `session_name` when set. It then checks with
+       `sts get-caller-identity` that it is that role in that account, and assumes it again if the session
+       expires during a long wait. The shell credentials are never replaced.
+    3. Any other case fails before touching the instance, for example a provider identity that isn't a role
+       and differs from the shell's.
+
+    The provider role is found from the provider credentials (`iam:GetRole`), or set with
+    `encryption.assume_role.role_arn`. Credentials configured only inside the provider block (`profile`,
+    static keys, `assume_role_with_web_identity`) aren't visible to the CLI. It starts from the process
+    environment, the same one the provider inherits.
   - Setting `encryption.enabled` back to `false`, or changing the key, first moves the instance back to
     the AWS owned key and waits for it, and only then schedules deletion of a module-created key.
   - Customer managed keys are supported for organization instances only. The key must be in the
     management account and in the instance region.
+  - Identity Center uses the key with the identity of whoever calls its APIs (a forward access session). The
+    identity Terraform runs as calls `UpdateInstance` and manages users and groups, so it needs
+    `kms:Encrypt`, `kms:Decrypt`, `kms:GenerateDataKeyWithoutPlaintext` and `kms:DescribeKey` on the key
+    through Identity Center and Identity Store. A module-created key grants these to that identity in its key
+    policy (`AllowTerraformIdentityCenterAdministration`, conditioned on `kms:ViaService`), so no IAM policy
+    change is needed. With your own key (`kms_key_arn`), add the same grant to its key policy or to the role's
+    IAM policy; otherwise `UpdateInstance` fails with `AccessDeniedException ... kms:GenerateDataKeyWithoutPlaintext`.
   - Spoke deployments (`is_hub: false`) running in a delegated administrator account keep managing users and
     groups once the instance is on the key only if they can use it. List those accounts in
     `encryption.delegated_admin_account_ids`,
@@ -161,8 +181,9 @@ usage: |-
   #  enabled: false                        # (Optional) true = encrypt with a customer managed KMS key; switching back to false
   #                                        #            reverts the instance to the AWS owned key. Default: false
   #  kms_key_arn: ""                       # (Optional) ARN of an existing symmetric KMS key in the management account and instance
-  #                                        #            region, whose policy follows the Identity Center baseline policy.
-  #                                        #            Empty = the module creates the key. Default: ""
+  #                                        #            region, whose policy follows the Identity Center baseline policy and
+  #                                        #            lets the Terraform role use it (see README). Empty = the module creates
+  #                                        #            the key. Default: ""
   #  deletion_window_in_days: 30           # (Optional) Module-created key only. Waiting period before deletion, 7-30. Default: 30
   #  multi_region: false                   # (Optional) Module-created key only. true = multi-Region primary key. Default: false
   #  enable_key_rotation: true             # (Optional) Module-created key only. Automatic key material rotation. Default: true
@@ -171,6 +192,14 @@ usage: |-
   #                                        #            granted key administration (kms:*) in the key policy; list the account
   #                                        #            of every spoke deployment (is_hub: false) of this module. Default: []
   #    - "444455556666"
+  #  assume_role:                          # (Optional) How the AWS CLI step takes on the provider identity; mirror the provider
+  #                                        #            assume_role when it needs more than the role. Default: {} (derived from
+  #                                        #            the provider credentials)
+  #    role_arn: ""                        # (Optional) Role the CLI runs as: the provider assume_role.role_arn. Empty = the role
+  #                                        #            behind the provider credentials, looked up with iam:GetRole. Default: ""
+  #    external_id: ""                     # (Optional) External ID the role trust policy requires: the provider
+  #                                        #            assume_role.external_id. Default: ""
+  #    session_name: "sso-instance-encryption" # (Optional) Role session name of the CLI. Default: "sso-instance-encryption"
   ```
 
   ## Generated `terragrunt.hcl`
@@ -330,7 +359,9 @@ quickstart: |-
   - IAM permissions for `sso:ListInstances` and the `identitystore:*` group/user/membership APIs.
   - Hub deployments: Cloud Control API access (`cloudformation:GetResource`) with `sso:DescribeInstance` and
     `sso:ListTagsForResource` to import the instance; with `encryption`, also `sso:UpdateInstance`, KMS key
-    management permissions, `iam:GetRole` (provider role lookup) and the AWS CLI >= 2.31.0 on the runner.
+    management permissions, `iam:GetRole` (provider role lookup, unless `encryption.assume_role.role_arn` is set),
+    `sts:AssumeRole` on the provider role from the runner credentials when they differ from it, and the AWS
+    CLI >= 2.31.0 on the runner.
   - An AWS IAM Identity Center instance already enabled in the target account/region.
 
   **Steps**

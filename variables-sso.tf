@@ -50,7 +50,8 @@ variable "groups" {
 #   enabled: false                      # (Optional) true = encrypt with a customer managed KMS key; false = keep the instance on the
 #                                       #            AWS owned key (switching back from true reverts to the AWS owned key). Default: false
 #   kms_key_arn: ""                     # (Optional) ARN of an existing symmetric KMS key in the management account and instance region.
-#                                       #            Its key policy must follow the Identity Center baseline policy. Empty = the module
+#                                       #            Its key policy must follow the Identity Center baseline policy and let the
+#                                       #            Terraform role use it (see README). Empty = the module
 #                                       #            creates the key (alias/identity-store-<system_name>). Default: ""
 #   deletion_window_in_days: 30         # (Optional) Module-created key only. Waiting period before deletion, 7-30. Default: 30
 #   multi_region: false                 # (Optional) Module-created key only. true = multi-Region primary key. Default: false
@@ -59,6 +60,14 @@ variable "groups" {
 #   delegated_admin_account_ids: []     # (Optional) Module-created key only. Identity Center delegated administrator account IDs
 #                                       #            granted key administration (kms:*) in the key policy; list the account
 #                                       #            of every spoke deployment (is_hub: false) of this module. Default: []
+#   assume_role:                        # (Optional) How the AWS CLI step takes on the provider identity; mirror the provider
+#                                       #            assume_role when it needs more than the role. Default: {} (derived from
+#                                       #            the provider credentials)
+#     role_arn: ""                      # (Optional) Role the CLI runs as: the provider assume_role.role_arn. Empty = the role
+#                                       #            behind the provider credentials, looked up with iam:GetRole. Default: ""
+#     external_id: ""                   # (Optional) External ID the role trust policy requires: the provider
+#                                       #            assume_role.external_id. Default: ""
+#     session_name: "sso-instance-encryption" # (Optional) Role session name of the CLI. Default: "sso-instance-encryption"
 variable "encryption" {
   description = "(Optional) At-rest encryption of the IAM Identity Center instance with a customer managed KMS key, applied only when is_hub is true. Default: {} (AWS owned key)"
   type        = any
@@ -66,6 +75,14 @@ variable "encryption" {
   validation {
     condition     = try(var.encryption.enabled, null) == null || can(tobool(var.encryption.enabled))
     error_message = "encryption.enabled must be true or false."
+  }
+  validation {
+    condition     = try(coalesce(var.encryption.assume_role.role_arn), "") == "" || can(regex("^arn:aws[a-z-]*:iam::[0-9]{12}:role/", var.encryption.assume_role.role_arn))
+    error_message = "encryption.assume_role.role_arn must be an IAM role ARN (arn:<partition>:iam::<account-id>:role/<path/name>)."
+  }
+  validation {
+    condition     = try(coalesce(var.encryption.assume_role.session_name), "") == "" || can(regex("^[\\w+=,.@-]{2,64}$", var.encryption.assume_role.session_name))
+    error_message = "encryption.assume_role.session_name must be 2-64 characters of letters, digits and +=,.@_-."
   }
   validation {
     condition     = try(coalesce(var.encryption.kms_key_arn), "") == "" || can(regex("^arn:aws[a-z-]*:kms:[a-z0-9-]+:[0-9]{12}:key/", var.encryption.kms_key_arn))

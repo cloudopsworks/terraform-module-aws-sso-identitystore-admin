@@ -33,7 +33,7 @@ locals {
   ]
 }
 
-# IAM Identity Center baseline KMS key policy:
+# IAM Identity Center baseline KMS key policy, plus the Terraform identity administering the instance:
 # https://docs.aws.amazon.com/singlesignon/latest/userguide/baseline-KMS-key-policy.html
 data "aws_iam_policy_document" "kms" {
   count = local.create_kms_key ? 1 : 0
@@ -110,6 +110,29 @@ data "aws_iam_policy_document" "kms" {
       test     = "ForAnyValue:StringEquals"
       variable = "kms:EncryptionContextKeys"
       values   = local.kms_encryption_context_keys
+    }
+  }
+  # Identity Center uses the key with the forward access session of the principal calling its APIs: the identity
+  # Terraform runs as configures the instance (UpdateInstance) and manages its users and groups, so it is granted the
+  # key here, through Identity Center and Identity Store only, and needs no identity-based KMS policy.
+  statement {
+    sid    = "AllowTerraformIdentityCenterAdministration"
+    effect = "Allow"
+    actions = [
+      "kms:Encrypt",
+      "kms:Decrypt",
+      "kms:GenerateDataKeyWithoutPlaintext",
+      "kms:DescribeKey",
+    ]
+    resources = ["*"]
+    principals {
+      type        = "AWS"
+      identifiers = [local.encryption_provider_principal_arn]
+    }
+    condition {
+      test     = "StringLike"
+      variable = "kms:ViaService"
+      values   = local.kms_via_services
     }
   }
   statement {

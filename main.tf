@@ -16,38 +16,67 @@ locals {
   # Bounds each wait. A timeout, like credentials expiring during a long wait, only fails the run: the forward update
   # is retried by the next apply, and a failed revert keeps the key.
   encryption_timeout_seconds = 3000
-  # UpdateInstance attempts, covering the propagation of a just-created key policy.
-  encryption_update_attempts = 5
+  # UpdateInstance attempts, covering the propagation of a just-created or just-updated key policy.
+  encryption_update_attempts = 12
   # Sets KEY_TYPE (and KMS_KEY_ARN) on the instance and waits for the re-encryption. The AWS CLI runs outside the
-  # provider, with the shell's credentials. When those are not already the provider identity, the provider's role is
-  # assumed first, so an assume_role provider configuration is honoured.
+  # provider, so it is given the provider identity: the shell's credentials when they already are that identity, else
+  # temporary credentials of the provider role (assume_role), assumed from them and verified. The shell's credentials
+  # are never replaced, so the role can be assumed again when its session expires during a long wait.
   encryption_script = <<-EOT
     set -e
-    CALLER_ARN=$(aws sts get-caller-identity --query Arn --output text)
-    if [ "$CALLER_ARN" != "$PROVIDER_ARN" ]; then
-      case "$CALLER_ARN" in
+    provider_identity() {
+      ASSUMED=""
+      CALLER_ARN=$(aws sts get-caller-identity --region "$REGION" --query Arn --output text) || exit 1
+      if [ "$CALLER_ARN" = "$PROVIDER_ARN" ]; then return 0; fi
+      if [ -z "$PROVIDER_ROLE_ARN" ]; then
+        echo "AWS CLI identity $CALLER_ARN is not the provider identity $PROVIDER_ARN, which is not a role to assume." >&2
+        exit 1
+      fi
+      case "$CALLER_ARN" in "$PROVIDER_ROLE_SESSION_PREFIX"*) return 0 ;; esac
+      set -- --region "$REGION" --role-arn "$PROVIDER_ROLE_ARN" --role-session-name "$ROLE_SESSION_NAME"
+      if [ -n "$EXTERNAL_ID" ]; then set -- "$@" --external-id "$EXTERNAL_ID"; fi
+      CREDENTIALS=$(aws sts assume-role "$@" \
+        --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]' --output text) || exit 1
+      set -- $CREDENTIALS
+      if [ -z "$3" ]; then
+        echo "Could not assume $PROVIDER_ROLE_ARN from $CALLER_ARN." >&2
+        exit 1
+      fi
+      ROLE_ACCESS_KEY_ID=$1 ROLE_SECRET_ACCESS_KEY=$2 ROLE_SESSION_TOKEN=$3 ASSUMED=1
+      ROLE_CALLER_ARN=$(provider_aws sts get-caller-identity --region "$REGION" --query Arn --output text) || exit 1
+      case "$ROLE_CALLER_ARN" in
         "$PROVIDER_ROLE_SESSION_PREFIX"*) ;;
         *)
-          if [ -z "$PROVIDER_ROLE_ARN" ]; then
-            echo "AWS CLI identity $CALLER_ARN differs from the provider identity $PROVIDER_ARN, which is not an assumed role." >&2
-            exit 1
-          fi
-          CREDENTIALS=$(aws sts assume-role --role-arn "$PROVIDER_ROLE_ARN" --role-session-name "$ROLE_SESSION_NAME" \
-            --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]' --output text)
-          set -- $CREDENTIALS
-          if [ -z "$3" ]; then
-            echo "Could not assume $PROVIDER_ROLE_ARN." >&2
-            exit 1
-          fi
-          unset AWS_PROFILE AWS_DEFAULT_PROFILE
-          export AWS_ACCESS_KEY_ID="$1" AWS_SECRET_ACCESS_KEY="$2" AWS_SESSION_TOKEN="$3"
+          echo "Assumed identity $ROLE_CALLER_ARN is not the provider role $PROVIDER_ROLE_ARN." >&2
+          exit 1
           ;;
       esac
-    fi
+    }
+    # The role credentials are exported in a subshell, so they never show in a process command line, and settings
+    # describing the shell credentials (profile, expiration) do not apply to them.
+    provider_aws() {
+      if [ -n "$ASSUMED" ]; then
+        (
+          unset AWS_PROFILE AWS_DEFAULT_PROFILE AWS_CREDENTIAL_EXPIRATION AWS_SECURITY_TOKEN
+          export AWS_ACCESS_KEY_ID="$ROLE_ACCESS_KEY_ID" AWS_SECRET_ACCESS_KEY="$ROLE_SECRET_ACCESS_KEY" \
+            AWS_SESSION_TOKEN="$ROLE_SESSION_TOKEN"
+          exec aws "$@"
+        )
+      else
+        aws "$@"
+      fi
+    }
+    describe() {
+      provider_aws sso-admin describe-instance --region "$REGION" --instance-arn "$INSTANCE_ARN" --query "$1" --output text
+    }
+    provider_identity
     # Sets STATUS and KEY. An instance never moved off the default reports no encryption details: the AWS owned key.
+    # A failed read is retried once with a fresh provider identity, in case the role session expired.
     read_encryption() {
-      DETAILS=$(aws sso-admin describe-instance --region "$REGION" --instance-arn "$INSTANCE_ARN" \
-        --query 'EncryptionConfigurationDetails.[EncryptionStatus,KeyType,KmsKeyArn]' --output text) || exit 1
+      DETAILS=$(describe 'EncryptionConfigurationDetails.[EncryptionStatus,KeyType,KmsKeyArn]') || {
+        provider_identity
+        DETAILS=$(describe 'EncryptionConfigurationDetails.[EncryptionStatus,KeyType,KmsKeyArn]') || exit 1
+      }
       set -- $DETAILS None None None
       STATUS=$1 KEY=$2 KEY_ARN=$3
       if [ "$STATUS" = "None" ]; then STATUS="ENABLED"; fi
@@ -74,20 +103,20 @@ locals {
     CONFIG="KeyType=$KEY_TYPE"
     if [ -n "$KMS_KEY_ARN" ]; then CONFIG="$CONFIG,KmsKeyArn=$KMS_KEY_ARN"; fi
     ATTEMPT=1
-    until aws sso-admin update-instance --region "$REGION" --instance-arn "$INSTANCE_ARN" --encryption-configuration "$CONFIG"; do
+    until provider_aws sso-admin update-instance --region "$REGION" --instance-arn "$INSTANCE_ARN" --encryption-configuration "$CONFIG"; do
       if [ "$ATTEMPT" -ge "$UPDATE_ATTEMPTS" ]; then
         echo "UpdateInstance failed $ATTEMPT times for $INSTANCE_ARN." >&2
         exit 1
       fi
       ATTEMPT=$((ATTEMPT + 1))
       sleep "$POLL_SECONDS"
+      provider_identity
     done
     # Gives DescribeInstance time to report the update before polling it.
     sleep "$POLL_SECONDS"
     wait_settled
     if [ "$STATUS" != "ENABLED" ] || [ "$KEY" != "$KEY_TYPE" ]; then
-      REASON=$(aws sso-admin describe-instance --region "$REGION" --instance-arn "$INSTANCE_ARN" \
-        --query 'EncryptionConfigurationDetails.EncryptionStatusReason' --output text) || REASON="unknown"
+      REASON=$(describe 'EncryptionConfigurationDetails.EncryptionStatusReason') || REASON="unknown"
       echo "Encryption update of $INSTANCE_ARN to $KEY_TYPE ended $STATUS with $KEY: $REASON" >&2
       exit 1
     fi
@@ -121,9 +150,10 @@ check "encryption_hub_only" {
   }
 }
 
-# Resolves the IAM role behind the provider credentials (issuer_arn keeps the role path), so the CLI can run as it.
+# Resolves the IAM role behind the provider credentials (issuer_arn keeps the role path), so the CLI can run as it,
+# unless encryption.assume_role.role_arn names it.
 data "aws_iam_session_context" "current" {
-  count = local.encryption_enabled ? 1 : 0
+  count = local.encryption_enabled && local.encryption_cli_role_arn == "" ? 1 : 0
   arn   = data.aws_caller_identity.current.arn
 }
 
@@ -131,6 +161,20 @@ locals {
   # Neither AWS::SSO::Instance (awscc) nor the AWS provider expose the instance encryption configuration, so it is
   # set through the AWS CLI. Kept in terraform_data input, out of triggers_replace, so a credential or script change
   # alone does not re-run the CLI.
+  encryption_cli_role_arn = try(coalesce(var.encryption.assume_role.role_arn), "")
+  # Role the CLI runs as: encryption.assume_role.role_arn, else the role behind the provider credentials; "" when the
+  # provider identity is not an assumed role (IAM user), which the CLI then has to match exactly.
+  encryption_provider_role_arn = local.encryption_cli_role_arn != "" ? local.encryption_cli_role_arn : try(
+    data.aws_iam_session_context.current[0].issuer_name != "" ? data.aws_iam_session_context.current[0].issuer_arn : "",
+    ""
+  )
+  encryption_provider_role_session_prefix = local.encryption_provider_role_arn == "" ? "" : format("arn:%s:sts::%s:assumed-role/%s/",
+    split(":", local.encryption_provider_role_arn)[1],
+    split(":", local.encryption_provider_role_arn)[4],
+    reverse(split("/", local.encryption_provider_role_arn))[0]
+  )
+  # IAM principal the provider runs as, granted use of the module-created key.
+  encryption_provider_principal_arn = local.encryption_provider_role_arn != "" ? local.encryption_provider_role_arn : data.aws_caller_identity.current.arn
   encryption_cli = local.encryption_enabled ? {
     script = local.encryption_script
     environment = {
@@ -139,15 +183,13 @@ locals {
       POLL_SECONDS    = local.encryption_poll_seconds
       TIMEOUT_SECONDS = local.encryption_timeout_seconds
       UPDATE_ATTEMPTS = local.encryption_update_attempts
-      # Only an identity that is not an assumed role is compared verbatim: session names may change on every run.
-      PROVIDER_ARN      = data.aws_iam_session_context.current[0].issuer_name == "" ? data.aws_caller_identity.current.arn : ""
-      PROVIDER_ROLE_ARN = data.aws_iam_session_context.current[0].issuer_name != "" ? data.aws_iam_session_context.current[0].issuer_arn : ""
-      PROVIDER_ROLE_SESSION_PREFIX = format("arn:%s:sts::%s:assumed-role/%s/",
-        local.partition,
-        data.aws_caller_identity.current.account_id,
-        data.aws_iam_session_context.current[0].issuer_name
-      )
-      ROLE_SESSION_NAME = "sso-instance-encryption"
+      # Only an identity that is not an assumed role is compared verbatim; a role matches on any of its sessions, as
+      # session names may change on every run.
+      PROVIDER_ARN                 = local.encryption_provider_role_arn == "" ? data.aws_caller_identity.current.arn : ""
+      PROVIDER_ROLE_ARN            = local.encryption_provider_role_arn
+      PROVIDER_ROLE_SESSION_PREFIX = local.encryption_provider_role_session_prefix
+      EXTERNAL_ID                  = try(coalesce(var.encryption.assume_role.external_id), "")
+      ROLE_SESSION_NAME            = try(coalesce(var.encryption.assume_role.session_name), "sso-instance-encryption")
     }
   } : null
 }
@@ -163,6 +205,13 @@ resource "terraform_data" "encryption_guard" {
     kms_key_arn  = local.encryption_kms_key_arn
   }
   input = local.encryption_cli
+
+  lifecycle {
+    precondition {
+      condition     = local.encryption_cli_role_arn == "" || startswith(data.aws_caller_identity.current.arn, local.encryption_provider_role_session_prefix)
+      error_message = "encryption.assume_role.role_arn must be the role the provider runs as (${data.aws_caller_identity.current.arn}), so the CLI keeps the provider auth context."
+    }
+  }
 
   provisioner "local-exec" {
     when        = destroy
