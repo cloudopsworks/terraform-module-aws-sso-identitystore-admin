@@ -40,3 +40,22 @@ users: []
 #    provisioned: true                   # Existing user: looked up by user_name, only memberships are managed.
 #    groups:
 #      - "Developers"
+#
+# encryption: (Optional) At-rest encryption of the IAM Identity Center instance with a customer managed KMS key.
+#             Applied only when is_hub: true, the deployment in the Organizations management account that owns the
+#             organization instance. Requires the AWS CLI >= 2.31.0 (sso-admin update-instance --encryption-configuration)
+#             on the runner. Default: {} (instance stays on the AWS owned key)
+encryption: {}
+#  enabled: false                        # (Optional) true = encrypt with a customer managed KMS key; switching back to false
+#                                        #            reverts the instance to the AWS owned key. Default: false
+#  kms_key_arn: ""                       # (Optional) ARN of an existing symmetric KMS key in the management account and instance
+#                                        #            region, whose policy follows the Identity Center baseline policy.
+#                                        #            Empty = the module creates the key. Default: ""
+#  deletion_window_in_days: 30           # (Optional) Module-created key only. Waiting period before deletion, 7-30. Default: 30
+#  multi_region: false                   # (Optional) Module-created key only. true = multi-Region primary key. Default: false
+#  enable_key_rotation: true             # (Optional) Module-created key only. Automatic key material rotation. Default: true
+#  rotation_period_in_days: 90           # (Optional) Module-created key only. Rotation period in days, 90-2560. Default: 90
+#  delegated_admin_account_ids: []       # (Optional) Module-created key only. Identity Center delegated administrator account IDs
+#                                        #            granted key administration (kms:*) in the key policy; list the account
+#                                        #            of every spoke deployment (is_hub: false) of this module. Default: []
+#    - "444455556666"

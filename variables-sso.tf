@@ -43,3 +43,32 @@ variable "groups" {
   type        = any
   default     = []
 }
+
+## YAML Format
+# encryption:                           # (Optional) At-rest encryption of the IAM Identity Center instance with a customer managed KMS key.
+#                                       #            Applied only when is_hub: true (organization instance, management account). Default: {}
+#   enabled: false                      # (Optional) true = encrypt with a customer managed KMS key; false = keep the instance on the
+#                                       #            AWS owned key (switching back from true reverts to the AWS owned key). Default: false
+#   kms_key_arn: ""                     # (Optional) ARN of an existing symmetric KMS key in the management account and instance region.
+#                                       #            Its key policy must follow the Identity Center baseline policy. Empty = the module
+#                                       #            creates the key (alias/identity-store-<system_name>). Default: ""
+#   deletion_window_in_days: 30         # (Optional) Module-created key only. Waiting period before deletion, 7-30. Default: 30
+#   multi_region: false                 # (Optional) Module-created key only. true = multi-Region primary key. Default: false
+#   enable_key_rotation: true           # (Optional) Module-created key only. Automatic key material rotation. Default: true
+#   rotation_period_in_days: 90         # (Optional) Module-created key only. Rotation period, 90-2560. Default: 90
+#   delegated_admin_account_ids: []     # (Optional) Module-created key only. Identity Center delegated administrator account IDs
+#                                       #            granted key administration (kms:*) in the key policy; list the account
+#                                       #            of every spoke deployment (is_hub: false) of this module. Default: []
+variable "encryption" {
+  description = "(Optional) At-rest encryption of the IAM Identity Center instance with a customer managed KMS key, applied only when is_hub is true. Default: {} (AWS owned key)"
+  type        = any
+  default     = {}
+  validation {
+    condition     = try(var.encryption.enabled, null) == null || can(tobool(var.encryption.enabled))
+    error_message = "encryption.enabled must be true or false."
+  }
+  validation {
+    condition     = try(coalesce(var.encryption.kms_key_arn), "") == "" || can(regex("^arn:aws[a-z-]*:kms:[a-z0-9-]+:[0-9]{12}:key/", var.encryption.kms_key_arn))
+    error_message = "encryption.kms_key_arn must be a KMS key ARN (arn:<partition>:kms:<region>:<account-id>:key/<key-id>), not an alias or a bare key ID."
+  }
+}

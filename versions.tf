@@ -8,12 +8,17 @@
 #
 
 terraform {
-  required_version = ">= 1.3"
+  # import blocks with for_each require Terraform/OpenTofu >= 1.7
+  required_version = ">= 1.7"
   # Complete with required providers for the module
   required_providers {
     aws = {
       source  = "hashicorp/aws"
       version = "~> 6.35"
+    }
+    awscc = {
+      source  = "hashicorp/awscc"
+      version = "~> 1.75"
     }
   }
 }
