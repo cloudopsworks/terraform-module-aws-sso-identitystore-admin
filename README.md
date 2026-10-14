@@ -19,6 +19,8 @@ IdentityStore resources: groups, users, and group memberships.
 - Creates groups.
 - Creates users when not pre-provisioned (provisioned=false).
 - Links memberships for both newly created and already-provisioned users (provisioned=true).
+- Adopts the existing IAM Identity Center instance into state (is_hub=true) and, optionally,
+  encrypts it at rest with a customer managed KMS key.
 Idempotent by design, it derives all desired state from inputs.
 
 
@@ -58,17 +60,105 @@ What it does
 - Creates users (optional) and sets their attributes (name, emails, addresses, display name).
 - Assigns users to groups, regardless of whether the user was created by this module or
   already existed (mark such users as provisioned: true).
+- On the hub deployment (`is_hub: true`, the Organizations management account), imports the
+  existing organization instance as `awscc_sso_instance.this[0]` through an `import` block, with no
+  manual `terraform import` and without changing its name or tags.
+- Optionally encrypts the instance at rest with a customer managed KMS key (`encryption`): either a
+  key created by the module with the IAM Identity Center baseline key policy, or your own key.
 
 Why use it
 - Keep SSO identities as code, reviewable and reproducible.
 - Consistent tagging and naming metadata via the Cloud Ops Works tags local module.
 - Safe for mixed estates: some users managed in HR/IdP, others bootstrapped by Terraform.
 
+At-rest encryption
+- Neither `AWS::SSO::Instance` (awscc) nor the AWS provider expose the instance encryption
+  configuration yet, so the module calls `aws sso-admin update-instance --encryption-configuration`
+  through the AWS CLI (a `terraform_data` resource). It waits for the asynchronous re-encryption
+  (`EncryptionStatus` back to `ENABLED`), failing with the reported `EncryptionStatusReason` on `UPDATE_FAILED`.
+- The CLI runs as the provider identity, including when the provider uses `assume_role`:
+  1. If the shell credentials already are that identity (the same IAM user, or any session of the same
+     role, as with Terragrunt `iam_role`), they are used as they are.
+  2. Otherwise the CLI assumes the provider role from the shell credentials, with
+     `encryption.assume_role.external_id` / `session_name` when set. It then checks with
+     `sts get-caller-identity` that it is that role in that account, and assumes it again if the session
+     expires during a long wait. The shell credentials are never replaced.
+  3. Any other case fails before touching the instance, for example a provider identity that isn't a role
+     and differs from the shell's.
+
+  The provider role is found from the provider credentials (`iam:GetRole`), or set with
+  `encryption.assume_role.role_arn`. Credentials configured only inside the provider block (`profile`,
+  static keys, `assume_role_with_web_identity`) aren't visible to the CLI. It starts from the process
+  environment, the same one the provider inherits.
+- Setting `encryption.enabled` back to `false`, or changing the key, first moves the instance back to
+  the AWS owned key and waits for it, and only then schedules deletion of a module-created key.
+- Customer managed keys are supported for organization instances only. The key must be in the
+  management account and in the instance region.
+- Identity Center uses the key with the identity of whoever calls its APIs (a forward access session). The
+  identity Terraform runs as calls `UpdateInstance` and manages users and groups, so it needs
+  `kms:Encrypt`, `kms:Decrypt`, `kms:GenerateDataKeyWithoutPlaintext` and `kms:DescribeKey` on the key
+  through Identity Center and Identity Store. A module-created key grants these to that identity in its key
+  policy (`AllowTerraformIdentityCenterAdministration`, conditioned on `kms:ViaService`), so no IAM policy
+  change is needed. With your own key (`kms_key_arn`), add the same grant to its key policy or to the role's
+  IAM policy; otherwise `UpdateInstance` fails with `AccessDeniedException ... kms:GenerateDataKeyWithoutPlaintext`.
+  The grant follows the identity that runs the apply, so apply through one role (the Terragrunt provider role).
+  It is still limited by that role's permissions boundary or session policies.
+- Other administrators in the management account (permission sets, break-glass roles) get the key only through
+  IAM after encryption: give them the same four actions in their IAM policies, or they can't manage users and
+  groups.
+- Spoke deployments (`is_hub: false`) running in a delegated administrator account keep managing users and
+  groups once the instance is on the key only if they can use it. List those accounts in
+  `encryption.delegated_admin_account_ids`,
+  and give their Terraform role, like any other cross-account principal calling Identity Center APIs, an IAM
+  policy allowing `kms:Encrypt`, `kms:Decrypt`, `kms:GenerateDataKeyWithoutPlaintext` and `kms:DescribeKey`
+  on the key (see the
+  [baseline KMS key policy](https://docs.aws.amazon.com/singlesignon/latest/userguide/baseline-KMS-key-policy.html)).
+- Users in member accounts whose permission sets call Identity Center or Identity Store APIs (for example,
+  console pages that read Identity Center data) need `kms:Decrypt` on the key in their permission set. The key
+  policy (`AllowOrgPrincipalsViaIdentityCenterAndIdentityStore`) already allows principals in the organization,
+  but KMS also requires an IAM policy in the caller's account for cross-account use. Without it, CloudTrail in
+  the member account shows `AccessDenied` for `kms:Decrypt` "because no identity-based policy allows the
+  kms:Decrypt action", with `invokedBy: sso.amazonaws.com`. Add this statement to the affected permission sets
+  (with a multi-Region key, the `*` region also covers the replicas, which share its key ID):
+
+  ```json
+  {
+    "Sid": "AllowIdentityCenterKmsDecryptViaService",
+    "Effect": "Allow",
+    "Action": "kms:Decrypt",
+    "Resource": "arn:aws:kms:*:111122223333:key/mrk-1234abcd12ab34cd56ef1234567890ab",
+    "Condition": {
+      "StringLike": {
+        "kms:ViaService": ["sso.*.amazonaws.com", "identitystore.*.amazonaws.com"]
+      }
+    }
+  }
+  ```
+
+  The statement works only through Identity Center and Identity Store, and grants no access beyond the
+  permission set's own `sso:` and `identitystore:` permissions. Signing in to the AWS access portal and using
+  permission sets need no KMS permission.
+- The revert runs from a destroy-only resource, so a failed or interrupted forward update (which the next
+  apply retries) never skips it.
+- With `multi_region: true`, `replica_regions` replicates the module-created key (same key policy and alias)
+  to the regions where IAM Identity Center is or will be replicated; AWS requires a multi-Region key for that.
+  Replicas exist before the instance moves to the key, and are deleted only after it has moved back. Removing a
+  region schedules that replica for deletion, so only do it once Identity Center no longer runs there. The
+  module doesn't replicate Identity Center itself. Switching `multi_region` on an existing key replaces the key.
+- Changing the key re-encrypts twice (back to the AWS owned key, then to the new key).
+- The encryption state is set by the CLI, not read back: a change made outside Terraform (console, API) is
+  not detected.
+
 Notes
 - The module selects the first SSO instance returned by aws_ssoadmin_instances data source.
   If you operate multiple instances, run the module in the account/region that matches your
   intended SSO instance, or wrap with extra selection logic.
-- Terraform >= 1.3 and AWS provider ~> 6.35 are required.
+- The `import` block makes this a root module: use it through Terragrunt (or as a root configuration),
+  not as a child `module` block.
+- The imported instance has `prevent_destroy`: it holds every user, group and assignment, and its
+  delete handler calls `DeleteInstance`. Before switching `is_hub` to `false` or destroying the
+  deployment, remove it from state with `terragrunt state rm 'awscc_sso_instance.this[0]'`.
+- Terraform/OpenTofu >= 1.7, AWS provider ~> 6.35 and AWSCC provider ~> 1.75 are required.
 
 ## Usage
 
@@ -143,6 +233,39 @@ users: []
 #    provisioned: true                   # Existing user: looked up by user_name, only memberships are managed.
 #    groups:
 #      - "Developers"
+#
+# encryption: (Optional) At-rest encryption of the IAM Identity Center instance with a customer managed KMS key.
+#             Applied only when is_hub: true, the deployment in the Organizations management account that owns the
+#             organization instance. Requires the AWS CLI >= 2.31.0 (sso-admin update-instance --encryption-configuration)
+#             on the runner. Default: {} (instance stays on the AWS owned key)
+encryption: {}
+#  enabled: false                        # (Optional) true = encrypt with a customer managed KMS key; switching back to false
+#                                        #            reverts the instance to the AWS owned key. Default: false
+#  kms_key_arn: ""                       # (Optional) ARN of an existing symmetric KMS key in the management account and instance
+#                                        #            region, whose policy follows the Identity Center baseline policy and
+#                                        #            lets the Terraform role use it (see README). Empty = the module creates
+#                                        #            the key. Default: ""
+#  deletion_window_in_days: 30           # (Optional) Module-created key only. Waiting period before deletion, 7-30. Default: 30
+#  multi_region: false                   # (Optional) Module-created key only. true = multi-Region primary key. Default: false
+#  replica_regions: []                   # (Optional) Module-created key only, requires multi_region: true. Regions where the key
+#                                        #            is replicated (same key policy and alias), e.g. for Identity Center
+#                                        #            replicated to other regions; [] = no replicas. Must not include the
+#                                        #            primary region. Default: []
+#    - "us-west-2"
+#  enable_key_rotation: true             # (Optional) Module-created key only. Automatic key material rotation. Default: true
+#  rotation_period_in_days: 90           # (Optional) Module-created key only. Rotation period in days, 90-2560. Default: 90
+#  delegated_admin_account_ids: []       # (Optional) Module-created key only. Identity Center delegated administrator account IDs
+#                                        #            granted key administration (kms:*) in the key policy; list the account
+#                                        #            of every spoke deployment (is_hub: false) of this module. Default: []
+#    - "444455556666"
+#  assume_role:                          # (Optional) How the AWS CLI step takes on the provider identity; mirror the provider
+#                                        #            assume_role when it needs more than the role. Default: {} (derived from
+#                                        #            the provider credentials)
+#    role_arn: ""                        # (Optional) Role the CLI runs as: the provider assume_role.role_arn, full ARN including path. Empty = the role
+#                                        #            behind the provider credentials, looked up with iam:GetRole. Default: ""
+#    external_id: ""                     # (Optional) External ID the role trust policy requires: the provider
+#                                        #            assume_role.external_id. Default: ""
+#    session_name: "sso-instance-encryption" # (Optional) Role session name of the CLI. Default: "sso-instance-encryption"
 ```
 
 ## Generated `terragrunt.hcl`
@@ -177,19 +300,48 @@ include "root" {
   path = find_in_parent_folders("root.hcl")
 }
 
+# The module also uses the awscc provider (awscc_sso_instance), which the root does not generate. It is configured
+# like the root provider "aws": same region and STS role. Remove assume_role when the root assumes the role (iam_role).
+generate "provider_awscc" {
+  path      = "provider_awscc.g.tf"
+  if_exists = "overwrite_terragrunt"
+  contents  = <<EOF
+provider "awscc" {
+  region = "${try(local.region_vars.region, local.global_vars.default.region)}"
+  assume_role = {
+    role_arn     = "${try(local.region_vars.sts_role_arn, local.spoke_vars.sts_role_arn, local.global_vars.default.sts_role_arn)}"
+    session_name = "terragrunt"
+  }
+}
+EOF
+}
+
 terraform {
-  source = "git::https://github.com/cloudopsworks/terraform-module-aws-sso-identitystore-admin.git//?ref=v1.2.4"
+  source = "git::https://github.com/cloudopsworks/terraform-module-aws-sso-identitystore-admin.git//?ref=v2.0.0"
 }
 
 inputs = {
   is_hub     = false
   org        = local.env_vars.org
   spoke_def  = local.spoke_vars.spoke
+  encryption = try(local.local_vars.encryption, {})
   groups     = try(local.local_vars.groups, [])
   users      = try(local.local_vars.users, [])
   extra_tags = local.tags
 }
 ```
+
+## AWSCC provider (every deployment)
+
+The module requires the `awscc` provider (for `awscc_sso_instance`), and Terraform/OpenTofu configure it
+on every plan, spokes included, even when nothing uses it. The Terragrunt root only generates
+`provider "aws"`, so the scaffolded `terragrunt.hcl` above generates `provider "awscc"` with the same
+region and STS role.
+
+**Upgrading an existing deployment from v1.2.x:** add the `generate "provider_awscc"` block shown above
+to its `terragrunt.hcl` before moving the `ref`, on hub and spoke deployments alike. Without it, `awscc`
+falls back to the environment credentials and fails without `AWS_REGION`. If the Terragrunt root
+assumes the role itself (`iam_role`), drop the `assume_role` attribute.
 
 ## Outputs
 
@@ -199,13 +351,21 @@ inputs = {
 | `identity_store_arn` | ARN of the IAM Identity Center (SSO) instance that owns the identity store. |
 | `users` | Map of users created by this module, keyed by `user_name`, with `id`, `user_name` and `display_name`. |
 | `groups` | Map of groups created by this module, keyed by `display_name`, with `id` and `display_name`. |
+| `kms_key_arn` | ARN of the customer managed KMS key encrypting the instance (module-created or provided); `null` when encryption is not managed. |
+| `kms_replica_key_arns` | Map of region to ARN of the multi-Region key replicas created by this module; empty when none. |
+| `kms_key_alias` | Alias of the KMS key created by this module; `null` when no key is created. |
 
 ## Quick Start
 
 **Prerequisites**
-- Terraform/OpenTofu >= 1.3 and Terragrunt
-- AWS provider ~> 6.35
+- Terraform/OpenTofu >= 1.7 and Terragrunt
+- AWS provider ~> 6.35 and AWSCC provider ~> 1.75 (`provider "awscc"` is needed by every deployment, see *Usage*)
 - IAM permissions for `sso:ListInstances` and the `identitystore:*` group/user/membership APIs.
+- Hub deployments: Cloud Control API access (`cloudformation:GetResource`) with `sso:DescribeInstance` and
+  `sso:ListTagsForResource` to import the instance; with `encryption`, also `sso:UpdateInstance`, KMS key
+  management permissions, `iam:GetRole` (provider role lookup, unless `encryption.assume_role.role_arn` is set),
+  `sts:AssumeRole` on the provider role from the runner credentials when they differ from it, and the AWS
+  CLI >= 2.31.0 on the runner.
 - An AWS IAM Identity Center instance already enabled in the target account/region.
 
 **Steps**
@@ -218,6 +378,7 @@ inputs = {
 - Set `provisioned: true` for users synced from your IdP; only memberships are managed.
 - Every group referenced in `users[].groups` must be declared in `groups`.
 - If multiple SSO instances exist, run in the account/region of the intended instance (the first one returned is used).
+- The first hub plan shows `awscc_sso_instance.this[0]` as *will be imported*. That is expected, and nothing on the instance changes.
 
 
 ## Examples
@@ -258,6 +419,34 @@ users:
       - "Readers"
 ```
 
+### Encrypt the Identity Center instance at rest (hub deployment, `is_hub: true`)
+
+```yaml
+# Module-created key with the Identity Center baseline key policy
+encryption:
+  enabled: true
+  rotation_period_in_days: 365
+  delegated_admin_account_ids:
+    - "444455556666"
+```
+
+```yaml
+# Multi-Region key, replicated where Identity Center is (or will be) replicated
+encryption:
+  enabled: true
+  multi_region: true
+  replica_regions:      # [] = multi-Region key without replicas yet
+    - "us-west-2"
+    - "eu-west-1"
+```
+
+```yaml
+# Bring your own key (management account, instance region)
+encryption:
+  enabled: true
+  kms_key_arn: "arn:aws:kms:us-east-1:111122223333:key/mrk-1234abcd12ab34cd56ef1234567890ab"
+```
+
 ### Mixed estate
 
 | `provisioned` | User created by module | Memberships managed | Appears in `users` output |
@@ -283,14 +472,17 @@ Available targets:
 
 | Name | Version |
 | ---- | ------- |
-| <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | >= 1.3 |
+| <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | >= 1.7 |
 | <a name="requirement_aws"></a> [aws](#requirement\_aws) | ~> 6.35 |
+| <a name="requirement_awscc"></a> [awscc](#requirement\_awscc) | ~> 1.75 |
 
 ## Providers
 
 | Name | Version |
 | ---- | ------- |
-| <a name="provider_aws"></a> [aws](#provider\_aws) | 6.67.0 |
+| <a name="provider_aws"></a> [aws](#provider\_aws) | ~> 6.35 |
+| <a name="provider_awscc"></a> [awscc](#provider\_awscc) | ~> 1.75 |
+| <a name="provider_terraform"></a> [terraform](#provider\_terraform) | n/a |
 
 ## Modules
 
@@ -306,6 +498,16 @@ Available targets:
 | [aws_identitystore_group_membership.group_membership](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/identitystore_group_membership) | resource |
 | [aws_identitystore_group_membership.provisioned_group_membership](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/identitystore_group_membership) | resource |
 | [aws_identitystore_user.user](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/identitystore_user) | resource |
+| [aws_kms_alias.replica](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/kms_alias) | resource |
+| [aws_kms_alias.this](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/kms_alias) | resource |
+| [aws_kms_key.this](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/kms_key) | resource |
+| [aws_kms_replica_key.this](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/kms_replica_key) | resource |
+| [awscc_sso_instance.this](https://registry.terraform.io/providers/hashicorp/awscc/latest/docs/resources/sso_instance) | resource |
+| [terraform_data.encryption](https://registry.terraform.io/providers/hashicorp/terraform/latest/docs/resources/data) | resource |
+| [terraform_data.encryption_guard](https://registry.terraform.io/providers/hashicorp/terraform/latest/docs/resources/data) | resource |
+| [aws_caller_identity.current](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/caller_identity) | data source |
+| [aws_iam_policy_document.kms](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/iam_policy_document) | data source |
+| [aws_iam_session_context.current](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/iam_session_context) | data source |
 | [aws_identitystore_user.user](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/identitystore_user) | data source |
 | [aws_region.current](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/region) | data source |
 | [aws_ssoadmin_instances.sso](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/ssoadmin_instances) | data source |
@@ -314,6 +516,7 @@ Available targets:
 
 | Name | Description | Type | Default | Required |
 | ---- | ----------- | ---- | ------- | :------: |
+| <a name="input_encryption"></a> [encryption](#input\_encryption) | (Optional) At-rest encryption of the IAM Identity Center instance with a customer managed KMS key, applied only when is\_hub is true. Default: {} (AWS owned key) | `any` | `{}` | no |
 | <a name="input_extra_tags"></a> [extra\_tags](#input\_extra\_tags) | Extra tags to add to the resources | `map(string)` | `{}` | no |
 | <a name="input_groups"></a> [groups](#input\_groups) | (Optional) List of groups to create in the identity store. Default: [] | `any` | `[]` | no |
 | <a name="input_is_hub"></a> [is\_hub](#input\_is\_hub) | Is this a hub or spoke configuration? | `bool` | `false` | no |
@@ -328,6 +531,9 @@ Available targets:
 | <a name="output_groups"></a> [groups](#output\_groups) | Map of groups created by this module, keyed by display\_name, with id and display\_name. |
 | <a name="output_identity_store_arn"></a> [identity\_store\_arn](#output\_identity\_store\_arn) | ARN of the IAM Identity Center (SSO) instance that owns the identity store. |
 | <a name="output_identity_store_id"></a> [identity\_store\_id](#output\_identity\_store\_id) | ID of the IAM Identity Center identity store resolved from the first SSO instance. |
+| <a name="output_kms_key_alias"></a> [kms\_key\_alias](#output\_kms\_key\_alias) | Alias of the KMS key created by this module for the IAM Identity Center instance; null when no key is created. |
+| <a name="output_kms_key_arn"></a> [kms\_key\_arn](#output\_kms\_key\_arn) | ARN of the customer managed KMS key encrypting the IAM Identity Center instance (module-created or provided); null when encryption is not managed. |
+| <a name="output_kms_replica_key_arns"></a> [kms\_replica\_key\_arns](#output\_kms\_replica\_key\_arns) | Map of region to ARN of the multi-Region KMS key replicas created by this module; empty when none. |
 | <a name="output_users"></a> [users](#output\_users) | Map of users created by this module, keyed by user\_name, with id, user\_name and display\_name. |
 
 
