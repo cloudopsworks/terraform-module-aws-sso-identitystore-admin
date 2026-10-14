@@ -197,8 +197,8 @@ resource "aws_kms_replica_key" "this" {
   description             = aws_kms_key.this[0].description
   deletion_window_in_days = aws_kms_key.this[0].deletion_window_in_days
   policy                  = data.aws_iam_policy_document.kms[0].json
-  tags                    = merge(local.all_tags, {
-    "replica" = "true"
+  tags = merge(local.all_tags, {
+    "replica"        = "true"
     "replica-region" = each.value
     "primary-region" = data.aws_region.current.region
   })

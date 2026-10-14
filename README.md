@@ -113,6 +113,31 @@ At-rest encryption
   policy allowing `kms:Encrypt`, `kms:Decrypt`, `kms:GenerateDataKeyWithoutPlaintext` and `kms:DescribeKey`
   on the key (see the
   [baseline KMS key policy](https://docs.aws.amazon.com/singlesignon/latest/userguide/baseline-KMS-key-policy.html)).
+- Users in member accounts whose permission sets call Identity Center or Identity Store APIs (for example,
+  console pages that read Identity Center data) need `kms:Decrypt` on the key in their permission set. The key
+  policy (`AllowOrgPrincipalsViaIdentityCenterAndIdentityStore`) already allows principals in the organization,
+  but KMS also requires an IAM policy in the caller's account for cross-account use. Without it, CloudTrail in
+  the member account shows `AccessDenied` for `kms:Decrypt` "because no identity-based policy allows the
+  kms:Decrypt action", with `invokedBy: sso.amazonaws.com`. Add this statement to the affected permission sets
+  (with a multi-Region key, the `*` region also covers the replicas, which share its key ID):
+
+  ```json
+  {
+    "Sid": "AllowIdentityCenterKmsDecryptViaService",
+    "Effect": "Allow",
+    "Action": "kms:Decrypt",
+    "Resource": "arn:aws:kms:*:111122223333:key/mrk-1234abcd12ab34cd56ef1234567890ab",
+    "Condition": {
+      "StringLike": {
+        "kms:ViaService": ["sso.*.amazonaws.com", "identitystore.*.amazonaws.com"]
+      }
+    }
+  }
+  ```
+
+  The statement works only through Identity Center and Identity Store, and grants no access beyond the
+  permission set's own `sso:` and `identitystore:` permissions. Signing in to the AWS access portal and using
+  permission sets need no KMS permission.
 - The revert runs from a destroy-only resource, so a failed or interrupted forward update (which the next
   apply retries) never skips it.
 - With `multi_region: true`, `replica_regions` replicates the module-created key (same key policy and alias)
