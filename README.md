@@ -480,8 +480,8 @@ Available targets:
 
 | Name | Version |
 | ---- | ------- |
-| <a name="provider_aws"></a> [aws](#provider\_aws) | 6.68.0 |
-| <a name="provider_awscc"></a> [awscc](#provider\_awscc) | 1.105.0 |
+| <a name="provider_aws"></a> [aws](#provider\_aws) | ~> 6.35 |
+| <a name="provider_awscc"></a> [awscc](#provider\_awscc) | ~> 1.75 |
 | <a name="provider_terraform"></a> [terraform](#provider\_terraform) | n/a |
 
 ## Modules
